@@ -216,3 +216,7 @@ mlartifacts/
 
 # Project outputs
 outputs/
+
+# Project Strategy&Workflow
+Strategy.md
+Workflow.md
