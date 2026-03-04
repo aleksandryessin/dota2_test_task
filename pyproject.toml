@@ -1,0 +1,38 @@
+[project]
+name = "dota2-first-pick"
+version = "0.1.0"
+description = "Dota 2 First-Pick Hero Prediction"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "lightgbm",
+    "torch",
+    "mlflow",
+    "dvc",
+    "pyyaml",
+    "tqdm",
+    "matplotlib",
+    "seaborn",
+    "jupyter",
+    "ipykernel",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

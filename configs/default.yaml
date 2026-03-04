@@ -1,0 +1,32 @@
+data:
+  path: "data/test_task_dataset.csv"
+  val_size: 200
+
+lgbm:
+  n_estimators: 150
+  num_leaves: 63
+  learning_rate: 0.05
+  min_child_samples: 20
+
+lstm:
+  embed_dim: 64
+  hidden_dim: 128
+  num_epochs: 20
+  batch_size: 512
+  learning_rate: 0.001
+  dropout: 0.3
+  patience: 5
+
+transformer:
+  embed_dim: 64
+  nhead: 4
+  num_layers: 2
+  num_epochs: 20
+  batch_size: 512
+  learning_rate: 0.001
+  dropout: 0.3
+  patience: 5
+
+mlflow:
+  experiment_name: "dota2-first-pick"
+  tracking_uri: "sqlite:///mlflow.db"
