@@ -35,8 +35,8 @@ from src.data.features import build_sequence_data, CONTEXT_DIM, MAX_BAN_SEQ_LEN
 # ─────────────────────────────────────────────────────────────
 
 N_TRIALS = 50
-MAX_EPOCHS = 40
-PATIENCE = 7
+MAX_EPOCHS = 100
+PATIENCE = 10
 
 
 def get_device():
@@ -151,9 +151,9 @@ def train_one(net, train_ban, train_ctx, train_tgt, device, cfg):
 def objective(trial, ctx):
     device = ctx["device"]
 
-    embed_dim = trial.suggest_categorical("embed_dim", [32, 64, 128])
-    nhead = trial.suggest_categorical("nhead", [2, 4, 8])
-    num_layers = trial.suggest_int("num_layers", 1, 4)
+    embed_dim = trial.suggest_categorical("embed_dim", [64, 128])
+    nhead = trial.suggest_categorical("nhead", [4, 16])
+    num_layers = trial.suggest_int("num_layers", 2, 3)
     ff_mult = trial.suggest_categorical("ff_mult", [2, 4, 8])
     head_dim = trial.suggest_categorical("head_dim", [128, 256, 512])
     dropout = trial.suggest_float("dropout", 0.05, 0.5)
