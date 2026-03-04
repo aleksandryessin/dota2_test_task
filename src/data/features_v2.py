@@ -73,19 +73,40 @@ def build_target_encoding(train_df, column, target2idx, alpha=20.0):
 
 
 def build_rolling_meta(train_df, target2idx, window=5000):
-    """Rolling hero pick frequency over the last `window` matches.
+    """Per-sample rolling hero pick frequency over the preceding `window` matches.
 
-    Returns np.array of shape [num_target_classes] — recent meta distribution.
+    Returns np.array of shape [N, num_target_classes].
+    Each row is the meta distribution computed from the `window` matches before that sample.
     """
     num_classes = len(target2idx)
+    heroes = train_df["first_pick_hero"].values
+    N = len(heroes)
 
-    recent = train_df.tail(window)["first_pick_hero"].value_counts()
-    meta = np.zeros(num_classes, dtype=np.float32)
-    for h, cnt in recent.items():
+    hero_indices = np.full(N, -1, dtype=np.int32)
+    for i, h in enumerate(heroes):
         if h in target2idx:
-            meta[target2idx[h]] = cnt
-    meta /= meta.sum() + 1e-8
-    return meta
+            hero_indices[i] = target2idx[h]
+
+    counts = np.zeros(num_classes, dtype=np.float64)
+    meta_arr = np.zeros((N, num_classes), dtype=np.float32)
+
+    for i in range(N):
+        total = min(i, window)
+        if total > 0:
+            row = counts.copy()
+            row /= total
+            meta_arr[i] = row.astype(np.float32)
+
+        idx = hero_indices[i]
+        if idx >= 0:
+            counts[idx] += 1
+
+        if i >= window:
+            old_idx = hero_indices[i - window]
+            if old_idx >= 0:
+                counts[old_idx] -= 1
+
+    return meta_arr
 
 
 def build_series_features(df, target2idx):
@@ -155,10 +176,11 @@ def build_context(df, game_positions=None):
 CONTEXT_SCALAR_DIM = 9
 
 
-def build_prior_vectors(df, captain_enc, team_enc, meta_vec, num_heroes):
+def build_prior_vectors(df, captain_enc, team_enc, meta_arr, num_heroes):
     """Per-sample prior distributions: captain + team + meta.
 
-    Returns np.array of shape [N, num_heroes * 3].
+    meta_arr: [N, num_heroes] per-sample rolling meta OR [num_heroes] single vector.
+    Returns (cap_arr, team_arr, meta_broadcast) each [N, num_heroes].
     """
     default = captain_enc["__default__"]
     cap_priors, team_priors = [], []
@@ -170,11 +192,15 @@ def build_prior_vectors(df, captain_enc, team_enc, meta_vec, num_heroes):
         cap_priors.append(captain_enc.get(cap_id, default))
         team_priors.append(team_enc.get(team_id, default) if pd.notna(team_id) else default)
 
-    cap_arr = np.stack(cap_priors)
-    team_arr = np.stack(team_priors)
-    meta_arr = np.tile(meta_vec, (len(df), 1))
+    cap_out = np.stack(cap_priors)
+    team_out = np.stack(team_priors)
 
-    return cap_arr, team_arr, meta_arr
+    if meta_arr.ndim == 1:
+        meta_out = np.tile(meta_arr, (len(df), 1))
+    else:
+        meta_out = meta_arr
+
+    return cap_out, team_out, meta_out
 
 
 def build_ban_mask(df, target2idx):

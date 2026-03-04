@@ -217,6 +217,12 @@ mlartifacts/
 # Project outputs
 outputs/
 
+# Model artifacts & large files
+*.npy
+*.pkl
+*.joblib
+lgbm_v2_model.txt
+
 # Project Strategy&Workflow
 Strategy.md
 Workflow.md

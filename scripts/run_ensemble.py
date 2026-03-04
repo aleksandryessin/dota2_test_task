@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V2 pipeline: candidate-scoring model with captain/team priors + data augmentation."""
+"""Ensemble: CandidateScorerNet + LightGBM weighted average."""
 
 import os
 import sys
@@ -10,6 +10,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import mlflow
@@ -26,27 +27,16 @@ from src.data.features_v2 import (
 )
 from src.models.candidate_scorer import CandidateScorerNet
 
-# ── Config ──────────────────────────────────────────────────
 VAL_SIZE = 200
 MAX_EPOCHS = 80
 PATIENCE = 12
 SEED = 42
 
 CFG = dict(
-    embed_dim=128,
-    hidden_dim=256,
-    nhead=2,
-    num_layers=2,
-    dropout=0.35,
-    lr=8e-4,
-    weight_decay=3e-5,
-    batch_size=512,
-    label_smoothing=0.05,
-    captain_alpha=20.0,
-    team_alpha=30.0,
-    meta_window=5000,
-    augment_side_swap=True,
-    augment_ban_perm=True,
+    embed_dim=128, hidden_dim=256, nhead=2, num_layers=2,
+    dropout=0.35, lr=8e-4, weight_decay=3e-5, batch_size=512,
+    label_smoothing=0.05, captain_alpha=20.0, team_alpha=30.0,
+    meta_window=5000, augment_side_swap=True, augment_ban_perm=True,
     focal_gamma=2.0,
 )
 
@@ -61,8 +51,7 @@ class FocalLoss(nn.Module):
         probs = log_probs.exp()
         nll = -log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        loss = ((1 - pt) ** self.gamma) * nll
-        return loss.mean()
+        return (((1 - pt) ** self.gamma) * nll).mean()
 
 
 def get_device():
@@ -73,16 +62,21 @@ def get_device():
     return torch.device("cpu")
 
 
-def accuracy_at_k(logits_np, val_heroes, idx2target, k=5, ban_mask_np=None):
+def accuracy_at_k(probs_np, val_heroes, idx2target, k=5, ban_mask_np=None):
     if ban_mask_np is not None:
-        logits_np = logits_np.copy()
-        logits_np[ban_mask_np > 0] = -np.inf
+        probs_np = probs_np.copy()
+        probs_np[ban_mask_np > 0] = -np.inf
     hits = 0
     for i, hero in enumerate(val_heroes):
-        top_k = [idx2target[j] for j in np.argsort(logits_np[i])[-k:][::-1]]
+        top_k = [idx2target[j] for j in np.argsort(probs_np[i])[-k:][::-1]]
         if hero in top_k:
             hits += 1
     return hits / len(val_heroes)
+
+
+def softmax_np(x):
+    e = np.exp(x - x.max(axis=1, keepdims=True))
+    return e / e.sum(axis=1, keepdims=True)
 
 
 def main():
@@ -96,14 +90,10 @@ def main():
     mlflow.set_experiment("dota2-first-pick")
 
     device = get_device()
-    print(f"Device: {device}")
-    print(f"Val size: {VAL_SIZE}")
-    print(f"Config: {CFG}")
-    print("=" * 80, flush=True)
+    print(f"Device: {device}", flush=True)
 
-    # ── Data ────────────────────────────────────────────────
-    print("Loading & parsing data...", flush=True)
-    import pandas as pd
+    # ── Data ──────────────────────────────────────────
+    print("Loading data...", flush=True)
     df, hero2idx, idx2hero = parse_drafts(pd.read_csv(config["data"]["path"]))
 
     train_df = df.iloc[:-VAL_SIZE].copy()
@@ -114,11 +104,6 @@ def main():
     idx2target = {i: h for h, i in target2idx.items()}
     num_heroes = len(target2idx)
 
-    print(f"Train: {len(train_df):,}  Val: {len(val_df):,}  "
-          f"Heroes: {len(hero2idx)} vocab / {num_heroes} targets", flush=True)
-
-    # ── Target encoding (on train only) ────────────────────
-    print("Building target encodings...", flush=True)
     captain_enc = build_target_encoding(
         train_df, "fp_captain", target2idx, alpha=CFG["captain_alpha"])
     team_enc = build_target_encoding(
@@ -128,22 +113,15 @@ def main():
         pd.concat([train_df, val_df], ignore_index=True), target2idx,
         window=CFG["meta_window"])[-VAL_SIZE:]
 
-    # ── Series features (before augmentation!) ─────────────
-    print("Building series features...", flush=True)
     train_game_pos, train_series_prior = build_series_features(train_df, target2idx)
     val_game_pos, val_series_prior = build_series_features(val_df, target2idx)
 
-    # ── Data augmentation (train only) ─────────────────────
     if CFG["augment_side_swap"]:
-        print("Augmenting: side swap...", flush=True)
         train_df = augment_side_swap(train_df)
         train_game_pos = np.concatenate([train_game_pos, train_game_pos])
         train_series_prior = np.concatenate([train_series_prior, train_series_prior])
         train_meta_arr = np.concatenate([train_meta_arr, train_meta_arr])
-        print(f"  Train after swap: {len(train_df):,}", flush=True)
 
-    # ── Build features ─────────────────────────────────────
-    print("Building features...", flush=True)
     train_bans = build_ban_sequences(train_df, hero2idx)
     train_ctx = build_context(train_df, game_positions=train_game_pos)
     train_tgt = train_df["first_pick_hero"].map(target2idx).values
@@ -166,9 +144,7 @@ def main():
         train_team = np.concatenate([train_team, train_team])
         train_meta = np.concatenate([train_meta, train_meta])
         train_series_prior = np.concatenate([train_series_prior, train_series_prior])
-        print(f"  Train after ban perm: {len(train_tgt):,}", flush=True)
 
-    # ── Move to device ─────────────────────────────────────
     t_bans = torch.tensor(train_bans, dtype=torch.long, device=device)
     t_ctx = torch.tensor(train_ctx, dtype=torch.float32, device=device)
     t_tgt = torch.tensor(train_tgt, dtype=torch.long, device=device)
@@ -184,38 +160,27 @@ def main():
     v_meta = torch.tensor(val_meta, dtype=torch.float32, device=device)
     v_series = torch.tensor(val_series_prior, dtype=torch.float32, device=device)
 
-    print(f"Train samples: {len(t_tgt):,}", flush=True)
-    print("=" * 80, flush=True)
+    print(f"Train: {len(t_tgt):,}  Val: {len(val_heroes)}", flush=True)
 
-    # ── Model ──────────────────────────────────────────────
+    # ── Train Neural Net ──────────────────────────────
+    print("\n=== Training CandidateScorerNet ===", flush=True)
     net = CandidateScorerNet(
-        vocab_size=len(hero2idx),
-        num_heroes=num_heroes,
-        embed_dim=CFG["embed_dim"],
-        hidden_dim=CFG["hidden_dim"],
-        context_dim=CONTEXT_SCALAR_DIM,
-        num_layers=CFG["num_layers"],
-        nhead=CFG["nhead"],
-        dropout=CFG["dropout"],
+        vocab_size=len(hero2idx), num_heroes=num_heroes,
+        embed_dim=CFG["embed_dim"], hidden_dim=CFG["hidden_dim"],
+        context_dim=CONTEXT_SCALAR_DIM, num_layers=CFG["num_layers"],
+        nhead=CFG["nhead"], dropout=CFG["dropout"],
     ).to(device)
-
-    n_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
-    print(f"Model params: {n_params:,}", flush=True)
 
     optimizer = torch.optim.AdamW(
         net.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=MAX_EPOCHS, eta_min=CFG["lr"] * 0.01)
-    if CFG.get("focal_gamma", 0) > 0:
-        criterion = FocalLoss(gamma=CFG["focal_gamma"])
-    else:
-        criterion = nn.CrossEntropyLoss(label_smoothing=CFG["label_smoothing"])
+    criterion = FocalLoss(gamma=CFG["focal_gamma"])
 
-    # ── Training loop ──────────────────────────────────────
     n = len(t_tgt)
     bs = CFG["batch_size"]
-    best_loss = float("inf")
     best_acc5 = 0.0
+    best_loss = float("inf")
     patience_ctr = 0
     best_state = None
 
@@ -223,8 +188,7 @@ def main():
     for epoch in range(MAX_EPOCHS):
         net.train()
         perm = torch.randperm(n, device=device)
-        total_loss = 0.0
-        nb = 0
+        total_loss, nb = 0.0, 0
         for start in range(0, n, bs):
             idx = perm[start:start + bs]
             logits = net(t_bans[idx], t_ctx[idx],
@@ -238,80 +202,97 @@ def main():
         scheduler.step()
         avg_loss = total_loss / nb
 
-        # Evaluate
         net.eval()
         with torch.no_grad():
-            val_logits = net(v_bans, v_ctx, v_cap, v_team, v_meta, v_series)
-            val_logits_np = val_logits.cpu().numpy()
+            val_logits_np = net(v_bans, v_ctx, v_cap, v_team, v_meta, v_series).cpu().numpy()
 
         acc5 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=5, ban_mask_np=val_ban_mask)
-        acc3 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=3, ban_mask_np=val_ban_mask)
-        acc1 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=1, ban_mask_np=val_ban_mask)
-        elapsed = time.time() - t0
 
         if acc5 > best_acc5:
             best_acc5 = acc5
             best_state = {k: v.cpu().clone() for k, v in net.state_dict().items()}
-
         if avg_loss < best_loss - 1e-4:
             best_loss = avg_loss
             patience_ctr = 0
         else:
             patience_ctr += 1
 
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            lr_now = scheduler.get_last_lr()[0]
-            star = " ***" if acc5 >= best_acc5 else ""
+        if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"  ep {epoch+1:3d}/{MAX_EPOCHS}  loss={avg_loss:.4f}  "
-                  f"acc@1={acc1:.3f} @3={acc3:.3f} @5={acc5:.3f}  "
-                  f"lr={lr_now:.6f}  ({elapsed:.0f}s){star}", flush=True)
+                  f"acc@5={acc5:.3f}  ({time.time()-t0:.0f}s)", flush=True)
 
         if patience_ctr >= PATIENCE:
             print(f"Early stop at epoch {epoch+1}", flush=True)
             break
 
-    train_sec = time.time() - t0
-
-    # ── Final evaluation with best checkpoint ──────────────
     if best_state is not None:
         net.load_state_dict(best_state)
         net.to(device)
 
     net.eval()
     with torch.no_grad():
-        val_logits_np = net(v_bans, v_ctx, v_cap, v_team, v_meta, v_series).cpu().numpy()
+        neural_logits = net(v_bans, v_ctx, v_cap, v_team, v_meta, v_series).cpu().numpy()
 
-    final_acc5 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=5, ban_mask_np=val_ban_mask)
-    final_acc3 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=3, ban_mask_np=val_ban_mask)
-    final_acc1 = accuracy_at_k(val_logits_np, val_heroes, idx2target, k=1, ban_mask_np=val_ban_mask)
+    neural_logits_masked = neural_logits.copy()
+    neural_logits_masked[val_ban_mask > 0] = -np.inf
+    neural_probs = softmax_np(neural_logits_masked)
 
-    prior_w = nn.functional.softplus(net.prior_weights).detach().cpu().numpy()
+    neural_acc5 = accuracy_at_k(neural_logits, val_heroes, idx2target, k=5, ban_mask_np=val_ban_mask)
+    neural_acc1 = accuracy_at_k(neural_logits, val_heroes, idx2target, k=1, ban_mask_np=val_ban_mask)
+    print(f"\nNeural net: acc@1={neural_acc1:.3f}  acc@5={neural_acc5:.3f}", flush=True)
 
-    sep = "=" * 80
+    # ── Load LightGBM probs ──────────────────────────
+    print("\n=== Loading LightGBM predictions ===", flush=True)
+    lgbm_probs = np.load("lgbm_val_probs.npy")
+    lgbm_probs_masked = lgbm_probs.copy()
+    lgbm_probs_masked[val_ban_mask > 0] = 0.0
+    lgbm_probs_masked /= lgbm_probs_masked.sum(axis=1, keepdims=True) + 1e-8
+
+    lgbm_acc5 = accuracy_at_k(lgbm_probs, val_heroes, idx2target, k=5, ban_mask_np=val_ban_mask)
+    lgbm_acc1 = accuracy_at_k(lgbm_probs, val_heroes, idx2target, k=1, ban_mask_np=val_ban_mask)
+    print(f"LightGBM:   acc@1={lgbm_acc1:.3f}  acc@5={lgbm_acc5:.3f}", flush=True)
+
+    # ── Ensemble: grid search best weight ────────────
+    print("\n=== Ensemble Search ===", flush=True)
+    best_ens_acc5 = 0.0
+    best_w = 0.5
+
+    for w_lgbm in np.arange(0.0, 1.05, 0.05):
+        w_neural = 1.0 - w_lgbm
+        ens_probs = w_neural * neural_probs + w_lgbm * lgbm_probs_masked
+        acc5 = accuracy_at_k(ens_probs, val_heroes, idx2target, k=5)
+        acc1 = accuracy_at_k(ens_probs, val_heroes, idx2target, k=1)
+        if acc5 > best_ens_acc5 or (acc5 == best_ens_acc5 and acc1 > best_ens_acc1):
+            best_ens_acc5 = acc5
+            best_ens_acc1 = acc1
+            best_w = w_lgbm
+        if w_lgbm in (0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0):
+            print(f"  w_lgbm={w_lgbm:.2f}  acc@1={acc1:.3f}  acc@5={acc5:.3f}", flush=True)
+
+    w_neural_best = 1.0 - best_w
+    ens_probs = w_neural_best * neural_probs + best_w * lgbm_probs_masked
+    ens_acc5 = accuracy_at_k(ens_probs, val_heroes, idx2target, k=5)
+    ens_acc3 = accuracy_at_k(ens_probs, val_heroes, idx2target, k=3)
+    ens_acc1 = accuracy_at_k(ens_probs, val_heroes, idx2target, k=1)
+
+    sep = "=" * 60
     print(f"\n{sep}")
-    print(f"FINAL (best by acc@5):  acc@1={final_acc1:.3f}  "
-          f"acc@3={final_acc3:.3f}  acc@5={final_acc5:.3f}")
-    print(f"Prior weights: captain={prior_w[0]:.3f}  "
-          f"team={prior_w[1]:.3f}  meta={prior_w[2]:.3f}  series={prior_w[3]:.3f}")
-    print(f"Epochs: {epoch+1}  Time: {train_sec:.1f}s")
+    print(f"BEST ENSEMBLE: w_neural={w_neural_best:.2f}  w_lgbm={best_w:.2f}")
+    print(f"  acc@1={ens_acc1:.3f}  acc@3={ens_acc3:.3f}  acc@5={ens_acc5:.3f}")
+    print(f"\nIndividual models:")
+    print(f"  Neural:   acc@5={neural_acc5:.3f}")
+    print(f"  LightGBM: acc@5={lgbm_acc5:.3f}")
     print(sep, flush=True)
 
-    # ── Log to MLflow ──────────────────────────────────────
-    with mlflow.start_run(run_name="v2_persample_meta"):
-        mlflow.log_params({k: str(v) for k, v in CFG.items()})
-        mlflow.log_params({"val_size": str(VAL_SIZE), "max_epochs": str(MAX_EPOCHS)})
-        mlflow.log_metric("accuracy_at_1", final_acc1)
-        mlflow.log_metric("accuracy_at_3", final_acc3)
-        mlflow.log_metric("accuracy_at_5", final_acc5)
-        mlflow.log_metric("best_train_loss", best_loss)
-        mlflow.log_metric("epochs_trained", epoch + 1)
-        mlflow.log_metric("train_time_sec", round(train_sec, 1))
-        mlflow.log_metric("prior_w_captain", float(prior_w[0]))
-        mlflow.log_metric("prior_w_team", float(prior_w[1]))
-        mlflow.log_metric("prior_w_meta", float(prior_w[2]))
-        mlflow.log_metric("prior_w_series", float(prior_w[3]))
-        mlflow.log_param("ban_masking", "True")
-        mlflow.set_tag("model_type", "v2_persample_meta")
+    with mlflow.start_run(run_name="v2_ensemble"):
+        mlflow.log_param("w_neural", f"{w_neural_best:.2f}")
+        mlflow.log_param("w_lgbm", f"{best_w:.2f}")
+        mlflow.log_metric("accuracy_at_1", ens_acc1)
+        mlflow.log_metric("accuracy_at_3", ens_acc3)
+        mlflow.log_metric("accuracy_at_5", ens_acc5)
+        mlflow.log_metric("neural_acc5", neural_acc5)
+        mlflow.log_metric("lgbm_acc5", lgbm_acc5)
+        mlflow.set_tag("model_type", "v2_ensemble")
     print("Logged to MLflow.", flush=True)
 
 
