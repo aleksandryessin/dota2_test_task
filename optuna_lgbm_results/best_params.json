@@ -1,0 +1,14 @@
+{
+  "captain_alpha": 7.7382578018207955,
+  "team_alpha": 40.08187695237324,
+  "meta_window": 9000,
+  "learning_rate": 0.04481053671661708,
+  "num_leaves": 33,
+  "max_depth": 6,
+  "min_child_samples": 8,
+  "subsample": 0.8445779114924311,
+  "colsample_bytree": 0.5925101071718902,
+  "reg_alpha": 0.05039156628791337,
+  "reg_lambda": 2.080962230659839,
+  "min_split_gain": 0.7006073144957847
+}

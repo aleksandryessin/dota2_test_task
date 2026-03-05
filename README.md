@@ -8,10 +8,10 @@ Predict which hero will be **first-picked** in professional Dota 2 Captain's Mod
 
 | | |
 |---|---|
-| **Model** | LightGBM with V2 features |
-| **Acc@5** | **0.475** (95/200) |
-| **Acc@1** | **0.225** (45/200) |
-| **Training** | 300 rounds, ~7 min |
+| **Model** | LightGBM with V2 features (Optuna-tuned) |
+| **Acc@5** | **0.485** (97/200) |
+| **Acc@1** | **0.220** (44/200) |
+| **Training** | 276 rounds, ~2.5 min |
 
 ## All Models Comparison
 
@@ -23,7 +23,8 @@ Predict which hero will be **first-picked** in professional Dota 2 Captain's Mod
 | Transformer V1 (default) | 0.080 | 0.225 | 0.320 | Ban + context |
 | Transformer V1 (Optuna) | 0.090 | 0.230 | 0.405 | 50 HPO trials |
 | CandidateScorerNet V2 | 0.150 | 0.325 | 0.425 | + priors, focal, series |
-| **LightGBM V2** | **0.225** | **0.360** | **0.475** | **V2 features** |
+| LightGBM V2 (manual) | 0.225 | 0.360 | 0.475 | V2 features |
+| **LightGBM V2 (Optuna)** | **0.220** | **0.355** | **0.485** | **40 HPO trials** |
 | Ensemble (neural + GBM) | 0.225 | 0.360 | 0.475 | = LightGBM alone |
 
 ## V2 Feature Engineering
@@ -86,6 +87,7 @@ Prior channels: captain distribution, team distribution, rolling meta, series hi
 │   ├── run_transformers.py       # Optuna HPO for Transformer V1
 │   ├── run_v2.py                 # V2 CandidateScorerNet pipeline
 │   ├── run_lgbm_v2.py            # LightGBM with V2 features
+│   ├── run_lgbm_optuna.py        # Optuna HPO for LightGBM V2
 │   └── run_ensemble.py           # Ensemble neural + LightGBM
 ├── configs/default.yaml
 ├── data/test_task_dataset.csv    # DVC-tracked
@@ -123,7 +125,8 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db
 
 ## Reproduce Best Result
 
-- **LightGBM V2 (0.475)**: `python scripts/run_lgbm_v2.py`
+- **LightGBM V2 Optuna (0.485)**: `python scripts/run_lgbm_optuna.py`
+- **LightGBM V2 manual (0.475)**: `python scripts/run_lgbm_v2.py`
 - **Neural V2 (0.425)**: open `notebooks/v2_pipeline.ipynb`
 - **Transformer V1 (0.405)**: open `notebooks/full_pipeline.ipynb`
 

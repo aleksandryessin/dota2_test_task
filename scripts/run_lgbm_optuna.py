@@ -3,7 +3,7 @@
 
 Features:
   - LightGBM early stopping per trial (stops if val logloss stops improving)
-  - Optuna pruning via LightGBMPruningCallback (kills bad trials mid-training)
+  - Optuna pruning via custom callback (kills bad trials mid-training)
   - MLflow logging of every trial (params, metrics, feature importance)
   - Best model saved with full diagnostics
   - Visualization: optimization history, param importance, feature importance, loss curves
@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import json
+import gc
 from pathlib import Path
 
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -21,7 +22,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 import optuna
-from optuna.integration import LightGBMPruningCallback
+from optuna.exceptions import TrialPruned
 import mlflow
 import yaml
 
@@ -174,15 +175,21 @@ def main():
             "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 1.0),
             "verbose": -1,
             "seed": SEED,
-            "n_jobs": -1,
+            "n_jobs": 4,
         }
 
         dtrain = lgb.Dataset(X_train, label=y_train)
         dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
 
-        # Train with early stopping + Optuna pruning callback
-        pruning_cb = LightGBMPruningCallback(trial, "val")
         evals_result = {}
+
+        def optuna_pruning_callback(env):
+            """Report val logloss (negated) to Optuna for pruning compatibility with maximize."""
+            for dataset_name, metric_name, value, _ in env.evaluation_result_list:
+                if dataset_name == "val" and metric_name == "multi_logloss":
+                    trial.report(-value, step=env.iteration)
+                    if trial.should_prune():
+                        raise TrialPruned(f"Pruned at iteration {env.iteration}")
 
         t0 = time.time()
         try:
@@ -195,10 +202,10 @@ def main():
                     lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
                     lgb.log_evaluation(period=0),
                     lgb.record_evaluation(evals_result),
-                    pruning_cb,
+                    optuna_pruning_callback,
                 ],
             )
-        except optuna.exceptions.TrialPruned:
+        except TrialPruned:
             raise
 
         train_sec = time.time() - t0
@@ -254,6 +261,9 @@ def main():
               f"@5={acc5:.3f}  rounds={n_rounds:3d}  ({train_sec:.0f}s){star}",
               flush=True)
 
+        del model, dtrain, dval, evals_result
+        gc.collect()
+
         return acc5
 
     # ── Run Optuna ──────────────────────────────────────
@@ -272,7 +282,7 @@ def main():
     )
 
     t_start = time.time()
-    study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
+    study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True, catch=(Exception,))
     total_time = time.time() - t_start
 
     # ── Results ─────────────────────────────────────────
